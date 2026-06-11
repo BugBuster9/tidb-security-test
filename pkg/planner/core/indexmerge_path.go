@@ -140,6 +140,12 @@ func generateNormalIndexPartialPaths4DNF(
 ) (paths []*util.AccessPath, needSelection bool, usedMap []bool) {
 	paths = make([]*util.AccessPath, 0, len(dnfItems))
 	usedMap = make([]bool, len(dnfItems))
+	candidatePaths = slices.DeleteFunc(candidatePaths, func(path *util.AccessPath) bool {
+		return path.Index != nil && path.Index.HasCondition()
+	})
+	if len(candidatePaths) == 0 {
+		return nil, false, usedMap
+	}
 	pushDownCtx := util.GetPushDownCtx(ds.SCtx())
 	for offset, item := range dnfItems {
 		cnfItems := expression.SplitCNFItems(item)
@@ -626,7 +632,7 @@ func generateMVIndexMergePartialPaths4And(ds *logicalop.DataSource, normalPathCn
 		idxCols, ok := PrepareIdxColsAndUnwrapArrayType(
 			ds.Table.Meta(),
 			possibleMVIndexPaths[idx].Index,
-			ds.TblCols,
+			ds.TblColsByID,
 			true,
 		)
 		if !ok {
@@ -719,7 +725,7 @@ func generateIndexMerge4NormalIndex(ds *logicalop.DataSource, regularPathCount i
 		skipRangeScanCheck := fixcontrol.GetBoolWithDefault(
 			ds.SCtx().GetSessionVars().GetOptimizerFixControlMap(),
 			fixcontrol.Fix52869,
-			false,
+			true,
 		)
 		if !skipRangeScanCheck {
 			for i := 1; i < len(ds.PossibleAccessPaths); i++ {
@@ -1051,7 +1057,7 @@ func generateIndexMerge4MVIndex(ds *logicalop.DataSource, normalPathCnt int, fil
 		idxCols, ok := PrepareIdxColsAndUnwrapArrayType(
 			ds.Table.Meta(),
 			ds.PossibleAccessPaths[idx].Index,
-			ds.TblCols,
+			ds.TblColsByID,
 			true,
 		)
 		if !ok {
@@ -1288,21 +1294,16 @@ func buildPartialPath4MVIndex(
 func PrepareIdxColsAndUnwrapArrayType(
 	tableInfo *model.TableInfo,
 	idxInfo *model.IndexInfo,
-	tblCols []*expression.Column,
+	tblColsByID map[int64]*expression.Column,
 	checkOnly1ArrayTypeCol bool,
 ) (idxCols []*expression.Column, ok bool) {
+	colInfos := tableInfo.Cols()
 	var virColNum = 0
 	for i := range idxInfo.Columns {
 		colOffset := idxInfo.Columns[i].Offset
-		colMeta := tableInfo.Cols()[colOffset]
-		var col *expression.Column
-		for _, c := range tblCols {
-			if c.ID == colMeta.ID {
-				col = c
-				break
-			}
-		}
-		if col == nil { // unexpected, no vir-col on this MVIndex
+		colMeta := colInfos[colOffset]
+		col, found := tblColsByID[colMeta.ID]
+		if !found { // unexpected, no vir-col on this MVIndex
 			return nil, false
 		}
 		if col.GetStaticType().IsArray() {

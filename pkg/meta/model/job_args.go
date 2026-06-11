@@ -1357,6 +1357,8 @@ type IndexArg struct {
 	IndexID  int64 `json:"index_id,omitempty"`
 	IfExist  bool  `json:"if_exist,omitempty"`
 	IsGlobal bool  `json:"is_global,omitempty"`
+	// ConditionString is used to store the partial index condition string for the index.
+	ConditionString string `json:"condition_string,omitempty"`
 }
 
 // ModifyIndexArgs is the argument for add/drop/rename index jobs,
@@ -1776,4 +1778,22 @@ func (a *RefreshMetaArgs) decodeV1(job *Job) error {
 // GetRefreshMetaArgs get the refresh meta argument.
 func GetRefreshMetaArgs(job *Job) (*RefreshMetaArgs, error) {
 	return getOrDecodeArgs[*RefreshMetaArgs](&RefreshMetaArgs{}, job)
+}
+
+// AlterTableAffinityArgs is the argument for AlterTableAffinity
+type AlterTableAffinityArgs struct {
+	Affinity *TableAffinityInfo `json:"affinity,omitempty"`
+}
+
+func (a *AlterTableAffinityArgs) getArgsV1(*Job) []any {
+	return []any{a}
+}
+
+func (a *AlterTableAffinityArgs) decodeV1(job *Job) error {
+	return errors.Trace(job.decodeArgs(a))
+}
+
+// GetAlterTableAffinityArgs get the alter table affinity argument.
+func GetAlterTableAffinityArgs(job *Job) (*AlterTableAffinityArgs, error) {
+	return getOrDecodeArgs[*AlterTableAffinityArgs](&AlterTableAffinityArgs{}, job)
 }

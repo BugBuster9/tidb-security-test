@@ -52,11 +52,13 @@ type DBReplace struct {
 	DbID        DownstreamID
 	TableMap    map[UpstreamID]*TableReplace
 	FilteredOut bool
+	Reused      bool
 }
 
 // SchemasReplace specifies schemas information mapping from up-stream cluster to down-stream cluster.
 type SchemasReplace struct {
-	DbReplaceMap map[UpstreamID]*DBReplace
+	DbReplaceMap  map[UpstreamID]*DBReplace
+	fromPitrIdMap bool
 
 	delRangeRecorder *brDelRangeExecWrapper
 	ingestRecorder   *ingestrec.IngestRecorder
@@ -88,12 +90,14 @@ func NewDBReplace(name string, newID DownstreamID) *DBReplace {
 		DbID:        newID,
 		TableMap:    make(map[UpstreamID]*TableReplace),
 		FilteredOut: false,
+		Reused:      false,
 	}
 }
 
 // NewSchemasReplace creates a SchemasReplace struct.
 func NewSchemasReplace(
 	dbReplaceMap map[UpstreamID]*DBReplace,
+	fromPitrIdMap bool,
 	tiflashRecorder *tiflashrec.TiFlashRecorder,
 	restoreTS uint64,
 	recordDeleteRange func(*PreDelRangeQuery),
@@ -117,6 +121,7 @@ func NewSchemasReplace(
 
 	return &SchemasReplace{
 		DbReplaceMap:        dbReplaceMap,
+		fromPitrIdMap:       fromPitrIdMap,
 		delRangeRecorder:    newDelRangeExecWrapper(globalTableIdMap, recordDeleteRange),
 		ingestRecorder:      ingestrec.New(),
 		TiflashRecorder:     tiflashRecorder,
@@ -139,9 +144,13 @@ func (sr *SchemasReplace) rewriteKeyForDB(key []byte, cf string) ([]byte, error)
 
 	dbMap, exist := sr.DbReplaceMap[dbID]
 	if !exist {
+		if sr.fromPitrIdMap {
+			log.Warn("failed to find db id in maps, but it is from pitr id map.", zap.Int64("dbID", dbID))
+			return nil, nil
+		}
 		return nil, errors.Annotatef(berrors.ErrInvalidArgument, "failed to find db id:%v in maps", dbID)
 	}
-	if dbMap.FilteredOut {
+	if dbMap.FilteredOut || dbMap.Reused {
 		return nil, nil
 	}
 
@@ -160,9 +169,13 @@ func (sr *SchemasReplace) rewriteDBInfo(value []byte) ([]byte, error) {
 
 	dbMap, exist := sr.DbReplaceMap[dbInfo.ID]
 	if !exist {
+		if sr.fromPitrIdMap {
+			log.Warn("failed to find db id in maps, but it is from pitr id map.", zap.Int64("dbID", dbInfo.ID))
+			return nil, nil
+		}
 		return nil, errors.Annotatef(berrors.ErrInvalidArgument, "failed to find db id:%v in maps", dbInfo.ID)
 	}
-	if dbMap.FilteredOut {
+	if dbMap.FilteredOut || dbMap.Reused {
 		return nil, nil
 	}
 
@@ -243,6 +256,10 @@ func (sr *SchemasReplace) rewriteKeyForTable(
 
 	dbReplace, exist := sr.DbReplaceMap[dbID]
 	if !exist {
+		if sr.fromPitrIdMap {
+			log.Warn("failed to find db id in maps, but it is from pitr id map.", zap.Int64("dbID", dbID))
+			return nil, nil
+		}
 		return nil, errors.Annotatef(berrors.ErrInvalidArgument, "failed to find db id:%v in maps", dbID)
 	}
 	if dbReplace.FilteredOut {
@@ -251,6 +268,10 @@ func (sr *SchemasReplace) rewriteKeyForTable(
 
 	tableReplace, exist := dbReplace.TableMap[tableID]
 	if !exist {
+		if sr.fromPitrIdMap {
+			log.Warn("failed to find table id in maps, but it is from pitr id map.", zap.Int64("dbID", dbID), zap.Int64("tableID", tableID))
+			return nil, nil
+		}
 		return nil, errors.Annotatef(berrors.ErrInvalidArgument, "failed to find table id:%v in maps", tableID)
 	}
 
@@ -282,6 +303,10 @@ func (sr *SchemasReplace) rewriteTableInfo(value []byte, dbID int64) ([]byte, er
 	// construct or find the id map.
 	dbReplace, exist = sr.DbReplaceMap[dbID]
 	if !exist {
+		if sr.fromPitrIdMap {
+			log.Warn("failed to find db id in maps, but it is from pitr id map.", zap.Int64("dbID", dbID))
+			return nil, nil
+		}
 		return nil, errors.Annotatef(berrors.ErrInvalidArgument, "failed to find db id:%v in maps", dbID)
 	}
 	if dbReplace.FilteredOut {
@@ -290,6 +315,10 @@ func (sr *SchemasReplace) rewriteTableInfo(value []byte, dbID int64) ([]byte, er
 
 	tableReplace, exist = dbReplace.TableMap[tableInfo.ID]
 	if !exist {
+		if sr.fromPitrIdMap {
+			log.Warn("failed to find table id in maps, but it is from pitr id map.", zap.Int64("dbID", dbID), zap.Int64("tableID", tableInfo.ID))
+			return nil, nil
+		}
 		return nil, errors.Annotatef(berrors.ErrInvalidArgument, "failed to find table id:%v in maps", tableInfo.ID)
 	}
 	if tableReplace.FilteredOut {

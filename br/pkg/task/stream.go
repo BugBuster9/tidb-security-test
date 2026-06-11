@@ -67,6 +67,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/spf13/pflag"
 	"github.com/tikv/client-go/v2/oracle"
+	pd "github.com/tikv/pd/client"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
@@ -1300,7 +1301,7 @@ func checkTaskCompat(cfg *RestoreConfig, task streamhelper.Task) error {
 func checkIncompatibleChangefeed(ctx context.Context, backupTS uint64, etcdCLI *clientv3.Client) error {
 	nameSet, err := cdcutil.GetIncompatibleChangefeedsWithSafeTS(ctx, etcdCLI, backupTS)
 	if err != nil {
-		return err
+		return errors.Trace(err)
 	}
 	if !nameSet.Empty() {
 		return errors.Errorf("%splease remove changefeed(s) before restore", nameSet.MessageToUser())
@@ -1328,7 +1329,7 @@ func RunStreamRestore(
 	if err != nil {
 		return errors.Trace(err)
 	}
-	logInfo, err := getLogInfoFromStorage(ctx, s)
+	logInfo, err := getLogInfoFromStorage(ctx, s, cfg.CheckRequirements)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1420,13 +1421,19 @@ func RunStreamRestore(
 	cfg.tableMappingManager = metaInfoProcessor.GetTableMappingManager()
 
 	// Capture restore start timestamp before any table creation (for blocklist)
-	restoreStartTS, err := restore.GetTSWithRetry(ctx, mgr.GetPDClient())
+	restoreStartTS, err := taskInfo.getRestoreStartTS(ctx, mgr.GetPDClient())
 	if err != nil {
 		return errors.Trace(err)
 	}
 	cfg.RestoreStartTS = restoreStartTS
 	log.Info("captured restore start timestamp for blocklist",
 		zap.Uint64("restoreStartTS", restoreStartTS))
+
+	if cfg.CheckRequirements {
+		if err := checkIncompatibleChangefeed(ctx, cfg.RestoreTS, mgr.GetDomain().GetEtcdClient()); err != nil {
+			return err
+		}
+	}
 
 	// restore full snapshot.
 	if taskInfo.NeedFullRestore {
@@ -1601,7 +1608,7 @@ func restoreStream(
 	var sstCheckpointSets map[string]struct{}
 	if cfg.UseCheckpoint {
 		gcRatioFromCheckpoint, err := client.LoadOrCreateCheckpointMetadataForLogRestore(
-			ctx, cfg.StartTS, cfg.RestoreTS, oldGCRatio, cfg.tiflashRecorder, cfg.logCheckpointMetaManager)
+			ctx, cfg.RestoreStartTS, cfg.StartTS, cfg.RestoreTS, oldGCRatio, cfg.tiflashRecorder, cfg.logCheckpointMetaManager)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1810,6 +1817,7 @@ func createLogClient(ctx context.Context, g glue.Glue, cfg *RestoreConfig, mgr *
 	keepaliveCfg := GetKeepalive(&cfg.Config)
 	keepaliveCfg.PermitWithoutStream = true
 	client := logclient.NewLogClient(mgr.GetPDClient(), mgr.GetPDHTTPClient(), mgr.GetTLSConfig(), keepaliveCfg)
+	client.SetCheckRequirements(cfg.CheckRequirements)
 
 	err = client.Init(ctx, g, mgr.GetStorage())
 	if err != nil {
@@ -1831,6 +1839,7 @@ func createLogClient(ctx context.Context, g glue.Glue, cfg *RestoreConfig, mgr *
 		return nil, errors.Trace(err)
 	}
 	client.SetCrypter(&cfg.CipherInfo)
+	client.SetRegionScanConcurrency(cfg.RegionScanConcurrency)
 	client.SetUpstreamClusterID(cfg.UpstreamClusterID)
 
 	err = client.InitClients(ctx, u, cfg.logCheckpointMetaManager, cfg.sstCheckpointMetaManager, uint(cfg.PitrConcurrency), cfg.ConcurrencyPerStore.Value)
@@ -1850,6 +1859,8 @@ func createLogClient(ctx context.Context, g glue.Glue, cfg *RestoreConfig, mgr *
 	if err = client.InstallLogFileManager(ctx, cfg.StartTS, cfg.RestoreTS, cfg.MetadataDownloadBatchSize, encryptionManager); err != nil {
 		return nil, errors.Trace(err)
 	}
+
+	client.SetRestoreID(cfg.RestoreID)
 
 	return client, nil
 }
@@ -1915,12 +1926,13 @@ func getLogInfo(
 	if err != nil {
 		return backupLogInfo{}, errors.Trace(err)
 	}
-	return getLogInfoFromStorage(ctx, s)
+	return getLogInfoFromStorage(ctx, s, cfg.CheckRequirements)
 }
 
 func getLogInfoFromStorage(
 	ctx context.Context,
 	s storage.ExternalStorage,
+	checkRequirements bool,
 ) (backupLogInfo, error) {
 	// logStartTS: Get log start ts from backupmeta file.
 	metaData, err := s.ReadFile(ctx, metautil.MetaFile)
@@ -1930,6 +1942,12 @@ func getLogInfoFromStorage(
 	backupMeta := &backuppb.BackupMeta{}
 	if err = backupMeta.Unmarshal(metaData); err != nil {
 		return backupLogInfo{}, errors.Trace(err)
+	}
+	if err = metautil.CheckBackupMetaCompatibilityFromBytes(metaData, backupMeta); err != nil {
+		if checkRequirements {
+			return backupLogInfo{}, errors.Trace(err)
+		}
+		log.Warn("skip backupmeta compatibility check error", logutil.ShortError(err))
 	}
 	// endVersion > 0 represents that the storage has been used for `br backup`
 	if backupMeta.GetEndVersion() > 0 {
@@ -2003,6 +2021,12 @@ func getFullBackupTS(
 	if err = backupmeta.Unmarshal(decryptedMetaData); err != nil {
 		return 0, 0, errors.Trace(err)
 	}
+	if err = metautil.CheckBackupMetaCompatibilityFromBytes(decryptedMetaData, backupmeta); err != nil {
+		if cfg.CheckRequirements {
+			return 0, 0, errors.Trace(err)
+		}
+		log.Warn("skip backupmeta compatibility check error", logutil.ShortError(err))
+	}
 
 	// start and end are identical in full backup, pick random one
 	return backupmeta.GetEndVersion(), backupmeta.GetClusterId(), nil
@@ -2073,6 +2097,13 @@ type PiTRTaskInfo struct {
 
 func (p *PiTRTaskInfo) hasTiFlashItemsInCheckpoint() bool {
 	return p.CheckpointInfo != nil && p.CheckpointInfo.Metadata != nil && p.CheckpointInfo.Metadata.TiFlashItems != nil
+}
+
+func (p *PiTRTaskInfo) getRestoreStartTS(ctx context.Context, pdClient pd.Client) (uint64, error) {
+	if p.CheckpointInfo != nil && p.CheckpointInfo.Metadata != nil {
+		return p.CheckpointInfo.Metadata.RestoreStartTS, nil
+	}
+	return restore.GetTSWithRetry(ctx, pdClient)
 }
 
 func generatePiTRTaskInfo(
@@ -2179,7 +2210,7 @@ func isCurrentIdMapSaved(checkpointTaskInfo *checkpoint.TaskInfoForLogRestore) b
 }
 
 func buildSchemaReplace(client *logclient.LogClient, cfg *LogRestoreConfig) (*stream.SchemasReplace, error) {
-	schemasReplace := stream.NewSchemasReplace(cfg.tableMappingManager.DBReplaceMap, cfg.tiflashRecorder,
+	schemasReplace := stream.NewSchemasReplace(cfg.tableMappingManager.DBReplaceMap, cfg.tableMappingManager.IsFromPiTRIDMap(), cfg.tiflashRecorder,
 		client.CurrentTS(), client.RecordDeleteRange, cfg.ExplicitFilter)
 	schemasReplace.AfterTableRewrittenFn = func(deleted bool, tableInfo *model.TableInfo) {
 		// When the table replica changed to 0, the tiflash replica might be set to `nil`.
@@ -2214,6 +2245,8 @@ func buildAndSaveIDMapIfNeeded(ctx context.Context, client *logclient.LogClient,
 	if cfg.PiTRTableTracker != nil {
 		cfg.tableMappingManager.ApplyFilterToDBReplaceMap(cfg.PiTRTableTracker)
 	}
+	// reuse existing database ids if it exists in the current cluster
+	cfg.tableMappingManager.ReuseExistingDatabaseIDs(client.GetDomain().InfoSchema())
 	// replace temp id with read global id
 	err = cfg.tableMappingManager.ReplaceTemporaryIDs(ctx, client.GenGlobalIDs)
 	if err != nil {

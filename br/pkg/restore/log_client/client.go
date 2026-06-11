@@ -204,6 +204,8 @@ type LogClient struct {
 	dom           *domain.Domain
 	tlsConf       *tls.Config
 	keepaliveConf keepalive.ClientParameters
+	// regionScanConcurrency controls max in-flight region scan requests to PD.
+	regionScanConcurrency uint
 
 	rawKVClient *rawkv.RawKVBatchClient
 	storage     storage.ExternalStorage
@@ -218,6 +220,7 @@ type LogClient struct {
 
 	upstreamClusterID uint64
 	restoreID         uint64
+	checkRequirements bool
 
 	// the query to insert rows into table `gc_delete_range`, lack of ts.
 	deleteRangeQuery          []*stream.PreDelRangeQuery
@@ -229,6 +232,15 @@ type LogClient struct {
 
 	logFilesStat logFilesStatistic
 	restoreStat  restoreStatistics
+}
+
+func (rc *LogClient) SetRestoreID(restoreID uint64) {
+	rc.restoreID = restoreID
+}
+
+// SetCheckRequirements controls whether backup metadata compatibility checks are enforced.
+func (rc *LogClient) SetCheckRequirements(checkRequirements bool) {
+	rc.checkRequirements = checkRequirements
 }
 
 type restoreStatistics struct {
@@ -256,9 +268,15 @@ func NewLogClient(
 		pdHTTPClient:       pdHTTPCli,
 		tlsConf:            tlsConf,
 		keepaliveConf:      keepaliveConf,
+		checkRequirements:  true,
 		deleteRangeQuery:   make([]*stream.PreDelRangeQuery, 0),
 		deleteRangeQueryCh: make(chan *stream.PreDelRangeQuery, 10),
 	}
+}
+
+// SetRegionScanConcurrency sets max in-flight region scan requests during compacted SST restore.
+func (rc *LogClient) SetRegionScanConcurrency(c uint) {
+	rc.regionScanConcurrency = c
 }
 
 // Close a client.
@@ -566,7 +584,7 @@ func (rc *LogClient) InitClients(
 
 	opt := snapclient.NewSnapFileImporterOptions(
 		rc.cipher, metaClient, importCli, backend,
-		snapclient.RewriteModeKeyspace, stores, concurrencyPerStore, createCallBacks, closeCallBacks,
+		snapclient.RewriteModeKeyspace, stores, concurrencyPerStore, rc.regionScanConcurrency, createCallBacks, closeCallBacks,
 	)
 	fileImporter, err := snapclient.NewSnapFileImporter(
 		ctx, rc.dom.Store().GetCodec().GetAPIVersion(), snapclient.TiDBCompacted, opt)
@@ -615,7 +633,7 @@ func (rc *LogClient) InitCheckpointMetadataForCompactedSstRestore(
 
 func (rc *LogClient) LoadOrCreateCheckpointMetadataForLogRestore(
 	ctx context.Context,
-	startTS, restoredTS uint64,
+	restoreStartTS, startTS, restoredTS uint64,
 	gcRatio string,
 	tiflashRecorder *tiflashrec.TiFlashRecorder,
 	logCheckpointMetaManager checkpoint.LogMetaManagerT,
@@ -651,6 +669,7 @@ func (rc *LogClient) LoadOrCreateCheckpointMetadataForLogRestore(
 		zap.String("gc-ratio", gcRatio), zap.Int("tiflash-item-count", len(items)))
 	if err := logCheckpointMetaManager.SaveCheckpointMetadata(ctx, &checkpoint.CheckpointMetadataForLogRestore{
 		UpstreamClusterID: rc.upstreamClusterID,
+		RestoreStartTS:    restoreStartTS,
 		RestoredTS:        restoredTS,
 		StartTS:           startTS,
 		RewriteTS:         rc.currentTS,
@@ -668,25 +687,27 @@ type LockedMigrations struct {
 	ReadLock storage.RemoteLock
 }
 
-func (rc *LogClient) GetLockedMigrations(ctx context.Context) (*LockedMigrations, error) {
+func (rc *LogClient) GetLockedMigrations(ctx context.Context) (ret *LockedMigrations, retErr error) {
 	ext := stream.MigrationExtension(rc.storage)
 	readLock, err := ext.GetReadLock(ctx, "restore stream")
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if retErr != nil {
+			readLock.UnlockOnCleanUp(ctx)
+		}
+	}()
 
 	migs, err := ext.Load(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	ms := migs.ListAll()
-
-	lms := &LockedMigrations{
-		Migs:     ms,
+	return &LockedMigrations{
+		Migs:     migs.ListAll(),
 		ReadLock: readLock,
-	}
-	return lms, nil
+	}, nil
 }
 
 func (rc *LogClient) InstallLogFileManager(ctx context.Context, startTS, restoreTS uint64, metadataDownloadBatchSize uint,
@@ -907,6 +928,7 @@ func (rc *LogClient) RestoreKVFiles(
 	var applyWg sync.WaitGroup
 	eg, ectx := errgroup.WithContext(ctx)
 	applyFunc := func(files []*LogDataFileInfo, kvCount int64, size uint64) {
+		cnt := 0
 		if len(files) == 0 {
 			return
 		}
@@ -920,6 +942,9 @@ func (rc *LogClient) RestoreKVFiles(
 			skipFile += len(files)
 		} else {
 			applyWg.Add(1)
+			cnt += 1
+			i := cnt
+			ectx := logutil.ContextWithField(ectx, zap.Int("sn", i))
 			rc.logRestoreManager.workerPool.ApplyOnErrorGroup(eg, func() (err error) {
 				fileStart := time.Now()
 				defer applyWg.Done()
@@ -930,8 +955,11 @@ func (rc *LogClient) RestoreKVFiles(
 
 					if err == nil {
 						filenames := make([]string, 0, len(files))
+						maxTs, minTs := uint64(0), uint64(math.MaxUint64)
 						for _, f := range files {
-							filenames = append(filenames, f.Path+", ")
+							maxTs = max(f.MaxTs, maxTs)
+							minTs = min(f.MinTs, minTs)
+							filenames = append(filenames, f.Path)
 							if rc.logRestoreManager.checkpointRunner != nil {
 								if e := checkpoint.AppendRangeForLogRestore(ectx, rc.logRestoreManager.checkpointRunner, f.MetaDataGroupName, rule.NewTableID, f.OffsetInMetaGroup, f.OffsetInMergedGroup); e != nil {
 									err = errors.Annotate(e, "failed to append checkpoint data")
@@ -939,7 +967,8 @@ func (rc *LogClient) RestoreKVFiles(
 								}
 							}
 						}
-						log.Info("import files done", zap.Int("batch-count", len(files)), zap.Uint64("batch-size", size),
+						logutil.CL(ectx).Info("import files done", zap.Int("batch-count", len(files)), zap.Uint64("batch-size", size),
+							zap.Uint64("min-ts", minTs), zap.Uint64("max-ts", maxTs), zap.String("cf", files[0].Cf),
 							zap.Duration("take", time.Since(fileStart)), zap.Strings("files", filenames))
 					}
 				}()
@@ -994,7 +1023,7 @@ func (rc *LogClient) GetBaseIDMapAndMerge(
 	hasFullBackupStorageConfig,
 	loadSavedIDMap bool,
 	logCheckpointMetaManager checkpoint.LogMetaManagerT,
-	tableMappingManger *stream.TableMappingManager,
+	tableMappingManager *stream.TableMappingManager,
 ) error {
 	var (
 		err        error
@@ -1033,7 +1062,8 @@ func (rc *LogClient) GetBaseIDMapAndMerge(
 
 	stream.LogDBReplaceMap("base db replace info", dbReplaces)
 	if len(dbReplaces) != 0 {
-		tableMappingManger.MergeBaseDBReplace(dbReplaces)
+		tableMappingManager.SetFromPiTRIDMap()
+		tableMappingManager.MergeBaseDBReplace(dbReplaces)
 	}
 	return nil
 }
@@ -1627,6 +1657,11 @@ func (rc *LogClient) generateRepairIngestIndexSQLs(
 			addSQL.WriteString(fmt.Sprintf(alterTableAddIndexFormat, info.ColumnList))
 			addArgs = append(addArgs, info.SchemaName.O, info.TableName.O, info.IndexInfo.Name.O)
 			addArgs = append(addArgs, info.ColumnArgs...)
+		}
+		// WHERE CONDITION
+		if len(info.IndexInfo.ConditionExprString) > 0 {
+			addSQL.WriteString(" WHERE ")
+			addSQL.WriteString(info.IndexInfo.ConditionExprString)
 		}
 		// USING BTREE/HASH/RTREE
 		indexTypeStr := info.IndexInfo.Tp.String()

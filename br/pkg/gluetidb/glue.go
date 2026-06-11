@@ -38,6 +38,9 @@ const brComment = `/*from(br)*/`
 // New makes a new tidb glue.
 func New() Glue {
 	log.Debug("enabling no register config")
+	// Set schema lease to production value (45s) instead of test default (1s)
+	// to prevent BR from getting stuck when PD TSO slightly lags wall clock.
+	session.SetSchemaLease(config.DefSchemaLease)
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.SkipRegisterToDashboard = true
 		conf.Log.EnableSlowLog.Store(false)
@@ -231,8 +234,8 @@ func (gs *tidbSession) ExecuteInternal(ctx context.Context, sql string, args ...
 	return nil
 }
 
-// CreateDatabase implements glue.Session.
-func (gs *tidbSession) CreateDatabase(ctx context.Context, schema *model.DBInfo) error {
+// CreateDatabaseOnExistError implements glue.Session.
+func (gs *tidbSession) CreateDatabaseOnExistError(ctx context.Context, schema *model.DBInfo) error {
 	return errors.Trace(executor.BRIECreateDatabase(gs.se, schema, brComment))
 }
 

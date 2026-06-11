@@ -171,7 +171,7 @@ func TestBackfillingSchedulerGlobalSortMode(t *testing.T) {
 	ext.(*ddl.LitBackfillScheduler).GlobalSort = true
 	sch.Extension = ext
 
-	taskID, err := mgr.CreateTask(ctx, task.Key, proto.Backfill, 1, "", task.Meta)
+	taskID, err := mgr.CreateTask(ctx, task.Key, proto.Backfill, 1, "", 0, task.Meta)
 	require.NoError(t, err)
 	task.ID = taskID
 	execIDs := []string{":4000"}
@@ -364,4 +364,16 @@ func createAddIndexTask(t *testing.T,
 	}
 
 	return task, server
+}
+
+func TestBackfillTaskMetaVersion(t *testing.T) {
+	// Test the default version.
+	meta := &ddl.BackfillTaskMeta{}
+	require.Equal(t, ddl.BackfillTaskMetaVersion0, meta.Version)
+
+	// Test the new version.
+	meta = &ddl.BackfillTaskMeta{
+		Version: ddl.BackfillTaskMetaVersion1,
+	}
+	require.Equal(t, ddl.BackfillTaskMetaVersion1, meta.Version)
 }

@@ -306,6 +306,21 @@ func TestParseHint(t *testing.T) {
 			},
 		},
 		{
+			input: "WRITE_SLOW_LOG, WRITE_SLOW_LOG",
+			output: []*ast.TableOptimizerHint{
+				{
+					HintName: model.NewCIStr("WRITE_SLOW_LOG"),
+				},
+				{
+					HintName: model.NewCIStr("WRITE_SLOW_LOG"),
+				},
+			},
+		},
+		{
+			input: "WRITE_SLOW_LOG()",
+			errs:  []string{`Optimizer hint syntax error at line 1 `},
+		},
+		{
 			input: "unknown_hint()",
 			errs:  []string{`Optimizer hint syntax error at line 1 `},
 		},
@@ -347,6 +362,112 @@ func TestParseHint(t *testing.T) {
 					HintData: ast.HintTimeRange{
 						From: "2020-02-20 12:12:12",
 						To:   "2020-02-20 13:12:12",
+					},
+				},
+			},
+		},
+		{
+			input: "LEADING(a,(b,(c,d)))",
+			output: []*ast.TableOptimizerHint{
+				{
+					HintName: model.NewCIStr("LEADING"),
+					HintData: &ast.LeadingList{
+						Items: []interface{}{
+							&ast.HintTable{TableName: model.NewCIStr("a")},
+							&ast.LeadingList{
+								Items: []interface{}{
+									&ast.HintTable{TableName: model.NewCIStr("b")},
+									&ast.LeadingList{
+										Items: []interface{}{
+											&ast.HintTable{TableName: model.NewCIStr("c")},
+											&ast.HintTable{TableName: model.NewCIStr("d")},
+										},
+									},
+								},
+							},
+						},
+					},
+					Tables: []ast.HintTable{
+						{TableName: model.NewCIStr("a")},
+						{TableName: model.NewCIStr("b")},
+						{TableName: model.NewCIStr("c")},
+						{TableName: model.NewCIStr("d")},
+					},
+				},
+			},
+		},
+		{
+			input: "LEADING(a,b,c)",
+			output: []*ast.TableOptimizerHint{
+				{
+					HintName: model.NewCIStr("LEADING"),
+					HintData: &ast.LeadingList{
+						Items: []interface{}{
+							&ast.HintTable{TableName: model.NewCIStr("a")},
+							&ast.HintTable{TableName: model.NewCIStr("b")},
+							&ast.HintTable{TableName: model.NewCIStr("c")},
+						},
+					},
+					Tables: []ast.HintTable{
+						{TableName: model.NewCIStr("a")},
+						{TableName: model.NewCIStr("b")},
+						{TableName: model.NewCIStr("c")},
+					},
+				},
+			},
+		},
+		{
+			input: "LEADING((a,b),(c,d))",
+			output: []*ast.TableOptimizerHint{
+				{
+					HintName: model.NewCIStr("LEADING"),
+					HintData: &ast.LeadingList{
+						Items: []interface{}{
+							&ast.LeadingList{
+								Items: []interface{}{
+									&ast.HintTable{TableName: model.NewCIStr("a")},
+									&ast.HintTable{TableName: model.NewCIStr("b")},
+								},
+							},
+							&ast.LeadingList{
+								Items: []interface{}{
+									&ast.HintTable{TableName: model.NewCIStr("c")},
+									&ast.HintTable{TableName: model.NewCIStr("d")},
+								},
+							},
+						},
+					},
+					Tables: []ast.HintTable{
+						{TableName: model.NewCIStr("a")},
+						{TableName: model.NewCIStr("b")},
+						{TableName: model.NewCIStr("c")},
+						{TableName: model.NewCIStr("d")},
+					},
+				},
+			},
+		},
+		{
+			input: "LEADING(x,(y,z),w)",
+			output: []*ast.TableOptimizerHint{
+				{
+					HintName: model.NewCIStr("LEADING"),
+					HintData: &ast.LeadingList{
+						Items: []interface{}{
+							&ast.HintTable{TableName: model.NewCIStr("x")},
+							&ast.LeadingList{
+								Items: []interface{}{
+									&ast.HintTable{TableName: model.NewCIStr("y")},
+									&ast.HintTable{TableName: model.NewCIStr("z")},
+								},
+							},
+							&ast.HintTable{TableName: model.NewCIStr("w")},
+						},
+					},
+					Tables: []ast.HintTable{
+						{TableName: model.NewCIStr("x")},
+						{TableName: model.NewCIStr("y")},
+						{TableName: model.NewCIStr("z")},
+						{TableName: model.NewCIStr("w")},
 					},
 				},
 			},

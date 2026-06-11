@@ -12,18 +12,28 @@ Level	Code	Message
 Note	1105	Analyze use auto adjusted sample rate 1.000000 for table planner__core__indexmerge_path.t, reason to use this rate is "TiDB assumes that the table is empty, use sample-rate=1"
 Warning	1105	The version 2 would collect all statistics not only the selected indexes
 set tidb_analyze_version=1;
+Level	Code	Message
+Warning	1287	'tidb_analyze_version=1' is deprecated and will be removed in a future release. Please use tidb_analyze_version=2 instead
 analyze table t;
 Level	Code	Message
 Warning	1105	analyzing multi-valued indexes is not supported, skip idx
 Warning	1105	analyzing multi-valued indexes is not supported, skip idx2
+Warning	1681	ANALYZE with tidb_analyze_version=1 is deprecated and will be removed in a future release.
 analyze table t index idx;
 Level	Code	Message
-Warning	1105	analyzing multi-valued indexes is not supported, skip idx
+Note	1105	Analyze use auto adjusted sample rate 1.000000 for table planner__core__indexmerge_path.t, reason to use this rate is "TiDB assumes that the table is empty, use sample-rate=1"
+Warning	1105	The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead
+Warning	1105	The version 2 would collect all statistics not only the selected indexes
 analyze table t index a;
+Level	Code	Message
+Note	1105	Analyze use auto adjusted sample rate 1.000000 for table planner__core__indexmerge_path.t, reason to use this rate is "TiDB assumes that the table is empty, use sample-rate=1"
+Warning	1105	The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead
+Warning	1105	The version 2 would collect all statistics not only the selected indexes
 analyze table t index a, idx, idx2;
 Level	Code	Message
-Warning	1105	analyzing multi-valued indexes is not supported, skip idx
-Warning	1105	analyzing multi-valued indexes is not supported, skip idx2
+Note	1105	Analyze use auto adjusted sample rate 1.000000 for table planner__core__indexmerge_path.t, reason to use this rate is "TiDB assumes that the table is empty, use sample-rate=1"
+Warning	1105	The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead
+Warning	1105	The version 2 would collect all statistics not only the selected indexes
 drop table if exists t;
 create table t(
 a int, j0 json, j1 json,
@@ -969,6 +979,30 @@ Selection	31.95	root		or(json_contains(planner__core__indexmerge_path.t1.col_45,
   └─Selection(Probe)	26.59	cop[tikv]		or(lt(planner__core__indexmerge_path.t1.col_44, 1980-03-18 00:00:00.000000), gt(planner__core__indexmerge_path.t1.col_44, 2011-10-24 00:00:00.000000))
     └─TableRowIDScan	39.94	cop[tikv]	table:t1	keep order:false, stats:pseudo
 drop table if exists t;
+create table if not exists t (
+id int,
+a int,
+b int,
+primary key (id, a),
+key ka (id, a),
+key kb (id, b)
+);
+explain format='brief' select /*+ use_index_merge(t, primary, kb) */ * from t where id=1 and (a=1 or b=1);
+id	estRows	task	access object	operator info
+IndexMerge	0.02	root		type: intersection
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:PRIMARY(id, a)	range:[1,1], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:kb(id, b)	range:[1,1], keep order:false, stats:pseudo
+└─Selection(Probe)	0.02	cop[tikv]		or(eq(planner__core__indexmerge_path.t.a, 1), eq(planner__core__indexmerge_path.t.b, 1))
+  └─TableRowIDScan	10.00	cop[tikv]	table:t	keep order:false, stats:pseudo
+explain format='brief' select /*+ use_index_merge(t, ka, kb) */ * from t where id=1 and (a=1 or b=1);
+id	estRows	task	access object	operator info
+IndexMerge	0.02	root		type: intersection
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ka(id, a)	range:[1,1], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:kb(id, b)	range:[1,1], keep order:false, stats:pseudo
+└─Selection(Probe)	0.02	cop[tikv]		or(eq(planner__core__indexmerge_path.t.a, 1), eq(planner__core__indexmerge_path.t.b, 1))
+  └─TableRowIDScan	10.00	cop[tikv]	table:t	keep order:false, stats:pseudo
+drop table if exists t;
+drop table if exists t;
 create table t(pk varbinary(255) primary key, a int, b varchar(50), c int, d varchar(45), index ia(a), index ib(b), index ic(c), index id(d));
 EXPLAIN format = brief SELECT /*+ use_index_merge(t) */ * FROM t WHERE a = 1 AND (b = '2' OR c = 3 OR d = '4');
 id	estRows	task	access object	operator info
@@ -994,19 +1028,32 @@ IndexLookUp	0.03	root
   └─TableRowIDScan	10.00	cop[tikv]	table:t	keep order:false, stats:pseudo
 EXPLAIN format = brief SELECT * FROM t WHERE a > 1 AND (b = '2' OR c = 3 OR d = '4');
 id	estRows	task	access object	operator info
-TableReader	9.99	root		data:Selection
-└─Selection	9.99	cop[tikv]		gt(planner__core__indexmerge_path.t.a, 1), or(eq(planner__core__indexmerge_path.t.b, "2"), or(eq(planner__core__indexmerge_path.t.c, 3), eq(planner__core__indexmerge_path.t.d, "4")))
-  └─TableFullScan	10000.00	cop[tikv]	table:t	keep order:false, stats:pseudo
+IndexMerge	9.99	root		type: union
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ib(b)	range:["2","2"], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ic(c)	range:[3,3], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:id(d)	range:["4","4"], keep order:false, stats:pseudo
+└─Selection(Probe)	9.99	cop[tikv]		gt(planner__core__indexmerge_path.t.a, 1)
+  └─TableRowIDScan	29.97	cop[tikv]	table:t	keep order:false, stats:pseudo
 EXPLAIN format = brief SELECT * FROM t WHERE a > 1 AND (b = '2' OR c = 3 OR b = '4' OR c = 5);
 id	estRows	task	access object	operator info
-TableReader	13.32	root		data:Selection
-└─Selection	13.32	cop[tikv]		gt(planner__core__indexmerge_path.t.a, 1), or(or(eq(planner__core__indexmerge_path.t.b, "2"), eq(planner__core__indexmerge_path.t.c, 3)), or(eq(planner__core__indexmerge_path.t.b, "4"), eq(planner__core__indexmerge_path.t.c, 5)))
-  └─TableFullScan	10000.00	cop[tikv]	table:t	keep order:false, stats:pseudo
+IndexMerge	13.32	root		type: union
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ib(b)	range:["2","2"], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ic(c)	range:[3,3], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ib(b)	range:["4","4"], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ic(c)	range:[5,5], keep order:false, stats:pseudo
+└─Selection(Probe)	13.32	cop[tikv]		gt(planner__core__indexmerge_path.t.a, 1)
+  └─TableRowIDScan	39.96	cop[tikv]	table:t	keep order:false, stats:pseudo
 EXPLAIN format = brief SELECT * FROM t WHERE a > 1 AND (b = '2' OR c = 3 OR b = '4' OR c = 5 OR b = '12' OR c = 13);
 id	estRows	task	access object	operator info
-TableReader	19.97	root		data:Selection
-└─Selection	19.97	cop[tikv]		gt(planner__core__indexmerge_path.t.a, 1), or(or(eq(planner__core__indexmerge_path.t.b, "2"), or(eq(planner__core__indexmerge_path.t.c, 3), eq(planner__core__indexmerge_path.t.b, "4"))), or(eq(planner__core__indexmerge_path.t.c, 5), or(eq(planner__core__indexmerge_path.t.b, "12"), eq(planner__core__indexmerge_path.t.c, 13))))
-  └─TableFullScan	10000.00	cop[tikv]	table:t	keep order:false, stats:pseudo
+IndexMerge	19.97	root		type: union
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ib(b)	range:["2","2"], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ic(c)	range:[3,3], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ib(b)	range:["4","4"], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ic(c)	range:[5,5], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ib(b)	range:["12","12"], keep order:false, stats:pseudo
+├─IndexRangeScan(Build)	10.00	cop[tikv]	table:t, index:ic(c)	range:[13,13], keep order:false, stats:pseudo
+└─Selection(Probe)	19.97	cop[tikv]		gt(planner__core__indexmerge_path.t.a, 1)
+  └─TableRowIDScan	59.91	cop[tikv]	table:t	keep order:false, stats:pseudo
 EXPLAIN format = brief SELECT * FROM t WHERE a = 1 AND (c = 13 OR c = 15 OR c = 5 OR b = '12' OR c = 13 OR b = '11');
 id	estRows	task	access object	operator info
 IndexLookUp	0.05	root		
@@ -1186,3 +1233,36 @@ IndexMerge	0.01	root		type: intersection
 │ └─IndexRangeScan	10.00	cop[tikv]	table:t1, index:mvi4(cast(`j` as unsigned array), d)	range:[5,5], keep order:false, stats:pseudo
 └─Selection(Probe)	0.01	cop[tikv]		eq(planner__core__indexmerge_path.t1.c, 1)
   └─TableRowIDScan	0.01	cop[tikv]	table:t1	keep order:false, stats:pseudo
+drop table if exists t;
+create table t(a int, b int, c int, index idx_ac(a, c), index idx_bc(b, c));
+insert into t values(1, 1, 100), (1, 2, 50), (1, 3, 150), (6, 6, 10), (7, 7, 20), (8, 8, 30), (9, 9, 5);
+explain format = brief select /*+ use_index_merge(t, idx_ac, idx_bc) */ * from t where a = 1 or b > 5 order by c limit 3;
+id	estRows	task	access object	operator info
+TopN	3.00	root		planner__core__indexmerge_path.t.c, offset:0, count:3
+└─IndexMerge	3.00	root		type: union
+  ├─Limit(Build)	3.00	cop[tikv]		offset:0, count:3
+  │ └─IndexRangeScan	10.00	cop[tikv]	table:t, index:idx_ac(a, c)	range:[1,1], keep order:true, stats:pseudo
+  ├─TopN(Build)	3.00	cop[tikv]		planner__core__indexmerge_path.t.c, offset:0, count:3
+  │ └─IndexRangeScan	3333.33	cop[tikv]	table:t, index:idx_bc(b, c)	range:(5,+inf], keep order:false, stats:pseudo
+  └─TopN(Probe)	3.00	cop[tikv]		planner__core__indexmerge_path.t.c, offset:0, count:3
+    └─TableRowIDScan	3340.00	cop[tikv]	table:t	keep order:false, stats:pseudo
+select /*+ use_index_merge(t, idx_ac, idx_bc) */ * from t where a = 1 or b > 5 order by c limit 3;
+a	b	c
+9	9	5
+6	6	10
+7	7	20
+explain format = brief select /*+ use_index_merge(t, idx_ac, idx_bc) */ * from t where a = 1 or b > 5 order by c limit 3 offset 1;
+id	estRows	task	access object	operator info
+TopN	3.00	root		planner__core__indexmerge_path.t.c, offset:1, count:3
+└─IndexMerge	4.00	root		type: union
+  ├─Limit(Build)	4.00	cop[tikv]		offset:0, count:4
+  │ └─IndexRangeScan	10.00	cop[tikv]	table:t, index:idx_ac(a, c)	range:[1,1], keep order:true, stats:pseudo
+  ├─TopN(Build)	4.00	cop[tikv]		planner__core__indexmerge_path.t.c, offset:0, count:4
+  │ └─IndexRangeScan	3333.33	cop[tikv]	table:t, index:idx_bc(b, c)	range:(5,+inf], keep order:false, stats:pseudo
+  └─TopN(Probe)	4.00	cop[tikv]		planner__core__indexmerge_path.t.c, offset:0, count:4
+    └─TableRowIDScan	3340.00	cop[tikv]	table:t	keep order:false, stats:pseudo
+select /*+ use_index_merge(t, idx_ac, idx_bc) */ * from t where a = 1 or b > 5 order by c limit 3 offset 1;
+a	b	c
+6	6	10
+7	7	20
+8	8	30
