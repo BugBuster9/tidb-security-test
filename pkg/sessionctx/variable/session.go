@@ -1058,6 +1058,7 @@ type SessionVars struct {
 	MergeJoinCostFactor        float64
 	HashJoinCostFactor         float64
 	IndexJoinCostFactor        float64
+	IndexJoinMaxScanRowsRatio  float64
 
 	// enableForceInlineCTE is used to enable/disable force inline CTE.
 	enableForceInlineCTE bool
@@ -1146,6 +1147,9 @@ type SessionVars struct {
 
 	// AllowProjectionPushDown enables pushdown projection on TiKV.
 	AllowProjectionPushDown bool
+
+	// EnableStrictNotNullCheck enables strict not-null check for single-row insert in non-strict mode.
+	EnableStrictNotNullCheck bool
 
 	// EnableStrictDoubleTypeCheck enables table field double type check.
 	EnableStrictDoubleTypeCheck bool
@@ -2258,6 +2262,7 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		MergeJoinCostFactor:           DefOptMergeJoinCostFactor,
 		HashJoinCostFactor:            DefOptHashJoinCostFactor,
 		IndexJoinCostFactor:           DefOptIndexJoinCostFactor,
+		IndexJoinMaxScanRowsRatio:     DefOptIndexJoinMaxScanRowsRatio,
 		CommandValue:                  uint32(mysql.ComSleep),
 		TiDBOptJoinReorderThreshold:   DefTiDBOptJoinReorderThreshold,
 		TiDBOptJoinReorderThroughProj: DefTiDBOptJoinReorderThroughProj,
